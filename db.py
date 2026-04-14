@@ -1,5 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
+from collections import defaultdict
 
 
 class Database:
@@ -54,8 +55,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     expense_id INTEGER NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
                     member_id INTEGER NOT NULL REFERENCES members(id),
-                    share REAL NOT NULL,
-                    settled INTEGER DEFAULT 0
+                    share REAL NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS settlements (
@@ -267,74 +267,92 @@ class Database:
             c.execute("DELETE FROM expenses WHERE id = ?", (row["id"],))
             return dict(row)
 
-    def get_balances(self, group_id: int) -> dict[tuple[int, int], float]:
+    def get_net_balances(self, group_id: int) -> dict[int, float]:
+        net = defaultdict(float)
+
         with self.conn() as c:
-            rows = c.execute("""
-                SELECT e.payer_member_id, es.member_id AS debtor_member_id, es.share
+            # expenses
+            expense_rows = c.execute("""
+                SELECT e.payer_member_id, es.member_id, es.share
                 FROM expense_splits es
                 JOIN expenses e ON e.id = es.expense_id
                 WHERE e.group_id = ?
-                  AND es.settled = 0
-                  AND e.payer_member_id != es.member_id
+                AND e.payer_member_id != es.member_id
             """, (group_id,)).fetchall()
 
-        from collections import defaultdict
+            for row in expense_rows:
+                payer = row["payer_member_id"]
+                debtor = row["member_id"]
+                share = round(float(row["share"]), 2)
 
-        net = defaultdict(lambda: defaultdict(float))
-        for row in rows:
-            payer = row["payer_member_id"]
-            debtor = row["debtor_member_id"]
-            share = row["share"]
-            net[debtor][payer] += share
-            net[payer][debtor] -= share
+                net[debtor] -= share
+                net[payer] += share
+
+            # settlements
+            settlement_rows = c.execute("""
+                SELECT from_member_id, to_member_id, amount
+                FROM settlements
+                WHERE group_id = ?
+            """, (group_id,)).fetchall()
+
+            for row in settlement_rows:
+                from_member = row["from_member_id"]
+                to_member = row["to_member_id"]
+                amount = round(float(row["amount"]), 2)
+
+                net[from_member] += amount
+                net[to_member] -= amount
+
+        return dict(net)
+    def get_balances(self, group_id: int) -> dict[tuple[int, int], float]:
+        net = self.get_net_balances(group_id)
+
+        creditors = []
+        debtors = []
+
+        for member_id, bal in net.items():
+            bal = round(bal, 2)
+            if bal > 0.005:
+                creditors.append([member_id, bal])
+            elif bal < -0.005:
+                debtors.append([member_id, -bal])
+
+        creditors.sort(key=lambda x: -x[1])
+        debtors.sort(key=lambda x: -x[1])
 
         result = {}
-        seen = set()
+        i = j = 0
 
-        for a, others in net.items():
-            for b, amount in others.items():
-                pair = tuple(sorted((a, b)))
-                if pair in seen:
-                    continue
-                seen.add(pair)
+        while i < len(debtors) and j < len(creditors):
+            debtor_id, debt_amt = debtors[i]
+            creditor_id, credit_amt = creditors[j]
 
-                net_ab = net[a][b]
-                if net_ab > 0.005:
-                    result[(a, b)] = round(net_ab, 2)
-                elif net_ab < -0.005:
-                    result[(b, a)] = round(-net_ab, 2)
+            transfer = round(min(debt_amt, credit_amt), 2)
+            result[(debtor_id, creditor_id)] = transfer
+
+            debtors[i][1] = round(debt_amt - transfer, 2)
+            creditors[j][1] = round(credit_amt - transfer, 2)
+
+            if debtors[i][1] < 0.005:
+                i += 1
+            if creditors[j][1] < 0.005:
+                j += 1
 
         return result
-
     def settle_between(self, group_id: int, from_member_id: int, to_member_id: int) -> float:
+        balances = self.get_balances(group_id)
+        owed = round(float(balances.get((from_member_id, to_member_id), 0.0)), 2)
+
+        if owed <= 0.005:
+            return 0.0
+
         with self.conn() as c:
-            rows = c.execute("""
-                SELECT es.id, es.share
-                FROM expense_splits es
-                JOIN expenses e ON e.id = es.expense_id
-                WHERE e.group_id = ?
-                  AND e.payer_member_id = ?
-                  AND es.member_id = ?
-                  AND es.settled = 0
-            """, (group_id, to_member_id, from_member_id)).fetchall()
+            c.execute("""
+                INSERT INTO settlements (group_id, from_member_id, to_member_id, amount)
+                VALUES (?, ?, ?, ?)
+            """, (group_id, from_member_id, to_member_id, owed))
 
-            total = round(sum(r["share"] for r in rows), 2)
-            ids = [r["id"] for r in rows]
-
-            if ids:
-                placeholders = ",".join("?" for _ in ids)
-                c.execute(
-                    f"UPDATE expense_splits SET settled = 1 WHERE id IN ({placeholders})",
-                    ids,
-                )
-
-            if total > 0:
-                c.execute("""
-                    INSERT INTO settlements (group_id, from_member_id, to_member_id, amount)
-                    VALUES (?, ?, ?, ?)
-                """, (group_id, from_member_id, to_member_id, total))
-
-            return total
+        return owed
 
     def get_member_by_name(self, group_id: int, display_name: str) -> dict | None:
         with self.conn() as c:

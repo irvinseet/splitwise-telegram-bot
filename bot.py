@@ -533,20 +533,23 @@ async def simplify_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     group_id = get_group_id(update)
-    debts = db.get_balances(group_id)
+    debts = db.get_balances(group_id)  # already simplified
     members = {m["id"]: m["display_name"] for m in db.get_members(group_id)}
-    simplified = simplify_debts(debts, members)
 
-    if not simplified:
+    if not debts:
         await update.message.reply_text("🎉 All settled up!")
         return
 
-    lines = [f"• {payer} → {receiver}: *${amount:.2f}*" for payer, receiver, amount in simplified]
+    lines = []
+    for (debtor_id, creditor_id), amount in debts.items():
+        payer = members.get(debtor_id, str(debtor_id))
+        receiver = members.get(creditor_id, str(creditor_id))
+        lines.append(f"• {payer} → {receiver}: *${amount:.2f}*")
+
     await update.message.reply_text(
         "💡 *Simplified debts:*\n\n" + "\n".join(lines),
         parse_mode="Markdown",
     )
-
 
 async def history_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await require_group(update):
@@ -661,6 +664,13 @@ async def settle_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     settled = db.settle_between(group_id, requester["id"], target["id"])
+
+    if settled <= 0.005:
+        await update.message.reply_text(
+            f"You do not currently owe {target['display_name']}."
+        )
+        return
+
     await update.message.reply_text(
         f"✅ Cleared what you owe {target['display_name']}. (${settled:.2f} cleared)"
     )
