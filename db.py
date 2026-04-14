@@ -374,3 +374,50 @@ class Database:
                 LIMIT ?
             """, (group_id, member_id, limit)).fetchall()
         return [dict(r) for r in rows]
+
+    def get_total_paid(self, group_id: int, member_id: int) -> float:
+        with self.conn() as c:
+            row = c.execute("""
+                SELECT COALESCE(SUM(amount), 0)
+                FROM expenses
+                WHERE group_id = ? AND payer_member_id = ?
+            """, (group_id, member_id)).fetchone()
+        return round(float(row[0]), 2)
+
+
+    def get_total_share(self, group_id: int, member_id: int) -> float:
+        with self.conn() as c:
+            row = c.execute("""
+                SELECT COALESCE(SUM(es.share), 0)
+                FROM expense_splits es
+                JOIN expenses e ON e.id = es.expense_id
+                WHERE e.group_id = ? AND es.member_id = ?
+            """, (group_id, member_id)).fetchone()
+        return round(float(row[0]), 2)
+
+    def get_member_expense_breakdown(self, group_id: int, member_id: int):
+        with self.conn() as c:
+            rows = c.execute("""
+                SELECT
+                    e.description AS desc,
+                    e.amount,
+                    e.payer_member_id,
+                    COALESCE(es.share, 0) AS share
+                FROM expenses e
+                LEFT JOIN expense_splits es
+                    ON es.expense_id = e.id
+                    AND es.member_id = ?
+                WHERE e.group_id = ?
+                ORDER BY e.id DESC
+            """, (member_id, group_id)).fetchall()
+
+        result = []
+        for r in rows:
+            paid = r["amount"] if r["payer_member_id"] == member_id else 0.0
+            result.append({
+                "desc": r["desc"],
+                "paid": round(float(paid), 2),
+                "share": round(float(r["share"]), 2),
+            })
+
+        return result

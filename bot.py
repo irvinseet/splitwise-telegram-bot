@@ -132,7 +132,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🧾 Core:\n"
         "  /add — add a new expense\n"
         "  /history — recent expenses\n"
-        "  /myexpenses — your actual trip spend\n\n"
+        "  /myexpenses [full] - see actual spent\n\n"
 
         "💰 Balances:\n"
         "  /balance — see all debts\n"
@@ -727,33 +727,40 @@ async def myexpenses_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     member_id = member["id"]
 
-    # 1. total paid
-    expenses = db.get_expenses_by_payer(group_id, member_id)
-    total_paid = sum(e["amount"] for e in expenses)
+    total_paid = db.get_total_paid(group_id, member_id)
+    my_share = db.get_total_share(group_id, member_id)
+    net_transfer = round(total_paid - my_share, 2)
 
-    # 2. compute debts
-    debts = db.get_balances(group_id)
+    if net_transfer > 0.005:
+        transfer_line = f"Others should pay you back: *${net_transfer:.2f}*"
+    elif net_transfer < -0.005:
+        transfer_line = f"You should pay others: *${-net_transfer:.2f}*"
+    else:
+        transfer_line = "You're exactly settled for your own share."
 
-    owed_to_me = 0
-    i_owe = 0
-
-    for (debtor, creditor), amount in debts.items():
-        if debtor == member_id:
-            i_owe += amount
-        elif creditor == member_id:
-            owed_to_me += amount
-
-    # 3. net spend
-    net_spend = total_paid - owed_to_me + i_owe
-
-    await update.message.reply_text(
+    msg = (
         f"🧾 *Your trip summary:*\n\n"
-        f"Paid: *${total_paid:.2f}*\n"
-        f"Others owe you: *${owed_to_me:.2f}*\n"
-        f"You owe others: *${i_owe:.2f}*\n\n"
-        f"👉 *Net spend: ${net_spend:.2f}*",
-        parse_mode="Markdown"
+        f"Paid upfront: *${total_paid:.2f}*\n"
+        f"Your actual share: *${my_share:.2f}*\n\n"
+        f"👉 {transfer_line}"
     )
+
+    # 🔥 FULL MODE
+    if ctx.args and ctx.args[0].lower() == "full":
+        items = db.get_member_expense_breakdown(group_id, member_id)
+
+        if items:
+            lines = []
+            for e in items:
+                lines.append(
+                    f"• *{e['desc']}* — you paid ${e['paid']:.2f}, "
+                    f"your share ${e['share']:.2f}"
+                )
+
+            msg += "\n\n📦 *Breakdown:*\n" + "\n".join(lines)
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
